@@ -3,6 +3,7 @@ import { PortfolioItem, UserSettings, YearProjection } from './types';
 import { PortfolioTable } from './components/PortfolioTable';
 import { Dashboard } from './components/Dashboard';
 import { calculateProjections } from './services/financialEngine';
+import { getMarketData } from './services/marketData';
 
 const DEFAULT_SETTINGS: UserSettings = {
   pauschbetrag: 1000,
@@ -10,12 +11,31 @@ const DEFAULT_SETTINGS: UserSettings = {
 };
 
 const App: React.FC = () => {
-  const [portfolio, setPortfolio] = useState<PortfolioItem[]>([]);
-  const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
+  // Load initial state from LocalStorage if available
+  const [portfolio, setPortfolio] = useState<PortfolioItem[]>(() => {
+    const saved = localStorage.getItem('dividend_portfolio');
+    return saved ? JSON.parse(saved) : [];
+  });
+  
+  const [settings, setSettings] = useState<UserSettings>(() => {
+    const saved = localStorage.getItem('dividend_settings');
+    return saved ? JSON.parse(saved) : DEFAULT_SETTINGS;
+  });
+
   const [projections, setProjections] = useState<YearProjection[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [tickerInput, setTickerInput] = useState("");
 
-  // Recalculate projections whenever inputs change
+  // Persistence Effects
+  useEffect(() => {
+    localStorage.setItem('dividend_portfolio', JSON.stringify(portfolio));
+  }, [portfolio]);
+
+  useEffect(() => {
+    localStorage.setItem('dividend_settings', JSON.stringify(settings));
+  }, [settings]);
+
+  // Calculation Effect
   useEffect(() => {
     if (portfolio.length > 0) {
       const data = calculateProjections(portfolio, settings);
@@ -24,6 +44,31 @@ const App: React.FC = () => {
       setProjections([]);
     }
   }, [portfolio, settings]);
+
+  const handleAddStock = (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!tickerInput.trim()) return;
+
+    const marketData = getMarketData(tickerInput);
+    
+    const newItem: PortfolioItem = {
+      id: Date.now().toString(),
+      symbol: marketData?.symbol || tickerInput.toUpperCase(),
+      name: marketData?.name || 'Manuelle Position',
+      shares: 0,
+      buyPrice: marketData?.price || 0,
+      currentPrice: marketData?.price || 0,
+      dividendYield: marketData?.dividendYield || 0,
+      dividendGrowth: marketData?.dividendGrowth || 2.5,
+      priceGrowth: marketData?.priceGrowth || 5.0,
+      payoutFrequency: marketData?.payoutFrequency || 1,
+      reinvest: true,
+      monthlyContribution: 0
+    };
+
+    setPortfolio([...portfolio, newItem]);
+    setTickerInput("");
+  };
 
   // File Import/Export
   const handleExport = () => {
@@ -55,39 +100,69 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gray-900 text-gray-100 font-sans">
+    <div className="min-h-screen bg-slate-900 text-slate-100 font-sans pb-20">
       
       {/* Header */}
-      <header className="bg-gray-800 border-b border-gray-700 p-4 sticky top-0 z-10 shadow-md">
-        <div className="max-w-7xl mx-auto flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-teal-400 to-blue-500">
-              Dividend Master DE
+      <header className="bg-slate-800 border-b border-slate-700 sticky top-0 z-20 shadow-lg">
+        <div className="max-w-7xl mx-auto px-4 py-3 flex justify-between items-center">
+          <div className="flex items-center gap-2">
+            <span className="text-2xl">📈</span>
+            <h1 className="text-xl md:text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-teal-400 to-blue-500">
+              Dividend Master
             </h1>
           </div>
           <button 
             onClick={() => setIsSettingsOpen(true)}
-            className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg transition-colors border border-gray-600 text-sm font-medium"
+            className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors text-slate-300"
+            aria-label="Einstellungen"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-teal-400" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
-            Einstellungen
           </button>
         </div>
       </header>
 
       {/* Main Content */}
-      <main className="max-w-7xl mx-auto p-4 md:p-6 space-y-8">
+      <main className="max-w-7xl mx-auto p-4 md:p-6 space-y-6">
         
-        {/* Section 1: Portfolio Input */}
+        {/* ADD STOCK BAR */}
+        <section className="bg-slate-800 rounded-xl p-4 shadow-lg border border-slate-700">
+          <label className="block text-sm font-medium text-slate-400 mb-2">Aktie hinzufügen</label>
+          <form onSubmit={handleAddStock} className="flex gap-2">
+            <div className="relative flex-1">
+              <input 
+                type="text" 
+                value={tickerInput}
+                onChange={(e) => setTickerInput(e.target.value)}
+                placeholder="z.B. MSFT, Allianz, O" 
+                className="w-full bg-slate-900 border border-slate-600 rounded-lg py-3 pl-4 pr-10 text-white placeholder-slate-500 focus:outline-none focus:border-teal-500 focus:ring-1 focus:ring-teal-500 transition-all shadow-inner"
+              />
+              <div className="absolute right-3 top-3 text-slate-500">
+                🔍
+              </div>
+            </div>
+            <button 
+              type="submit"
+              className="bg-teal-600 hover:bg-teal-500 text-white font-semibold py-3 px-6 rounded-lg transition-colors shadow-lg active:scale-95"
+            >
+              Hinzufügen
+            </button>
+          </form>
+        </section>
+
+        {/* DATA TABLE / LIST */}
         <section>
           <PortfolioTable portfolio={portfolio} setPortfolio={setPortfolio} />
         </section>
 
-        {/* Section 2: Dashboard/Charts */}
+        {/* DASHBOARD */}
         {projections.length > 0 && (
-          <section className="animate-fade-in">
+          <section className="animate-fade-in pt-4">
+             <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+                📊 Langzeit-Prognose
+             </h2>
              <Dashboard 
               projections={projections} 
               portfolio={portfolio} 
@@ -99,14 +174,12 @@ const App: React.FC = () => {
 
       {/* Settings Modal */}
       {isSettingsOpen && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-xl border border-gray-700 shadow-2xl w-full max-w-md overflow-hidden">
-            <div className="p-5 border-b border-gray-700 flex justify-between items-center bg-gray-850">
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in">
+          <div className="bg-slate-800 rounded-xl border border-slate-600 shadow-2xl w-full max-w-md overflow-hidden">
+            <div className="p-5 border-b border-slate-700 flex justify-between items-center bg-slate-900">
               <h2 className="text-xl font-bold text-white">Einstellungen</h2>
-              <button onClick={() => setIsSettingsOpen(false)} className="text-gray-400 hover:text-white">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
+              <button onClick={() => setIsSettingsOpen(false)} className="text-slate-400 hover:text-white">
+                ✕
               </button>
             </div>
             
@@ -114,54 +187,34 @@ const App: React.FC = () => {
               
               {/* Pauschbetrag */}
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Sparerpauschbetrag (€)</label>
+                <label className="block text-sm font-medium text-slate-300 mb-2">Sparerpauschbetrag (€)</label>
                 <div className="relative">
-                  <span className="absolute left-3 top-2 text-gray-500">€</span>
                    <input 
                     type="number"
                     value={settings.pauschbetrag}
                     onChange={(e) => setSettings({...settings, pauschbetrag: parseFloat(e.target.value) || 0})}
-                    className="w-full bg-gray-900 border border-gray-600 rounded-lg pl-8 pr-3 py-2 text-white focus:outline-none focus:border-teal-500 focus:ring-1 focus:ring-teal-500"
-                    placeholder="1000"
+                    className="w-full bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 text-white focus:border-teal-500 focus:ring-1 focus:ring-teal-500"
                   />
                 </div>
-                <p className="text-xs text-gray-500 mt-2">
-                  Alle Dividendenerträge über diesem Betrag werden automatisch mit 26,375% (Abgeltung + Soli) versteuert.
-                </p>
               </div>
 
-              {/* Export/Import */}
-              <div className="pt-4 border-t border-gray-700">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-3">Daten-Backup</h3>
+              {/* Data Management */}
+              <div className="pt-4 border-t border-slate-700">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">Backup</h3>
                 <div className="grid grid-cols-2 gap-3">
                   <button 
                     onClick={handleExport}
-                    className="flex justify-center items-center gap-2 bg-gray-700 hover:bg-gray-600 text-white py-2 rounded-lg text-sm transition-colors border border-gray-600"
+                    className="flex justify-center items-center gap-2 bg-slate-700 hover:bg-slate-600 text-white py-2 rounded-lg text-sm border border-slate-600"
                   >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                    </svg>
-                    Speichern
+                    💾 Speichern
                   </button>
-                  <label className="flex justify-center items-center gap-2 bg-gray-700 hover:bg-gray-600 text-white py-2 rounded-lg text-sm transition-colors border border-gray-600 cursor-pointer text-center">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                    </svg>
-                    Laden
+                  <label className="flex justify-center items-center gap-2 bg-slate-700 hover:bg-slate-600 text-white py-2 rounded-lg text-sm border border-slate-600 cursor-pointer">
+                    📂 Laden
                     <input type="file" onChange={handleImport} className="hidden" accept=".json" />
                   </label>
                 </div>
               </div>
 
-            </div>
-            
-            <div className="bg-gray-850 p-4 border-t border-gray-700 flex justify-end">
-              <button 
-                onClick={() => setIsSettingsOpen(false)}
-                className="bg-teal-600 hover:bg-teal-500 text-white px-6 py-2 rounded-lg font-medium transition-colors"
-              >
-                Fertig
-              </button>
             </div>
           </div>
         </div>
