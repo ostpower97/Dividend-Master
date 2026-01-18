@@ -1,0 +1,5 @@
+{
+  "name": "Dividend Master DE",
+  "description": "Ein professioneller Dividenden-Tracker mit deutscher Steuerlogik (Abgeltungsteuer, Sparerpauschbetrag), Zinseszins-Simulation und Portfolio-Reinvestitionsstrategien.",
+  "requestFramePermissions": []
+}
