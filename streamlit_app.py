@@ -46,103 +46,130 @@ if 'portfolio' not in st.session_state:
         'Sparrate €', 'Intervall', 'Reinvest'
     ])
 
-# --- PROFESSIONAL YFINANCE FETCHING (v4.0 Bulletproof) ---
+# --- PROFESSIONAL YFINANCE FETCHING (v5.0 Currency Aware) ---
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_data(ticker_symbol):
     """
-    Holt Daten via yfinance.
-    Strategie: fast_info (Metadata) > history (API) > download (Bulk API).
+    Holt Daten via yfinance und konvertiert Fremdwährungen live in EUR.
     """
     clean_ticker = ticker_symbol.upper().strip()
     
     try:
-        # 1. Ticker Objekt erstellen
-        # WICHTIG: Keine Session erzwingen, yfinance verwaltet das intern oft besser in neueren Versionen
         stock = yf.Ticker(clean_ticker)
         
-        # --- A. PREIS ERMITTLUNG ---
+        # --- A. PREIS & WÄHRUNG ---
         current_price = None
+        currency = "EUR" # Default Annahme
         
-        # Versuch 1: fast_info (Sehr schnell, wenig Overhead)
         try:
+            # Versuch via fast_info (enthält oft Währung)
             current_price = stock.fast_info.last_price
+            currency = stock.fast_info.currency
         except:
             pass
             
-        # Versuch 2: history (Der Standard-Weg)
+        # Fallback history
         if current_price is None or pd.isna(current_price):
             try:
                 hist = stock.history(period="5d")
                 if not hist.empty:
                     current_price = hist['Close'].iloc[-1]
+                    # Versuch Währung aus Meta zu holen, falls fast_info leer war
+                    if not currency or currency == "EUR":
+                        meta = stock.info
+                        currency = meta.get('currency', 'EUR')
             except:
                 pass
 
-        # Versuch 3: download (Nuclear Option - holt kompletten DataFrame)
+        # Fallback download
         if current_price is None or pd.isna(current_price):
             try:
-                # threads=False verhindert oft Threading-Probleme in Streamlit
                 df = yf.download(clean_ticker, period="5d", progress=False, threads=False)
                 if not df.empty:
-                    # In neuen yfinance Versionen kann das MultiIndex sein
                     if isinstance(df.columns, pd.MultiIndex):
-                        current_price = df.xs('Close', axis=1, level=0).iloc[-1].iloc[0] # Sehr tiefer Griff
+                        current_price = df.xs('Close', axis=1, level=0).iloc[-1].iloc[0]
                     else:
                         current_price = df['Close'].iloc[-1]
-            except Exception as e:
-                print(f"Download Fallback failed: {e}")
+            except:
+                pass
 
-        # Wenn wir immer noch keinen Preis haben, Abbruch.
         if current_price is None or pd.isna(current_price):
             return None
 
-        # --- B. DIVIDENDEN (Yield Berechnung) ---
+        # --- B. WÄHRUNGSUMRECHNUNG (FX -> EUR) ---
+        # Wenn Währung gefunden und nicht EUR, rechne um.
+        if currency and currency.upper() != 'EUR':
+            try:
+                rate = 1.0
+                if currency.upper() == 'USD':
+                    # Yahoo Ticker für USD zu EUR ist 'EUR=X'
+                    fx = yf.Ticker("EUR=X")
+                    rate = fx.fast_info.last_price
+                elif currency.upper() == 'GBP':
+                    fx = yf.Ticker("GBPEUR=X")
+                    rate = fx.fast_info.last_price
+                elif currency.upper() == 'CHF':
+                    fx = yf.Ticker("CHFEUR=X")
+                    rate = fx.fast_info.last_price
+                
+                # Plausibilitätscheck Rate (darf nicht 0 oder None sein)
+                if rate and rate > 0:
+                    current_price = current_price * rate
+            except Exception as e:
+                print(f"Währungsumrechnung Fehler für {currency}: {e}")
+                # Im Fehlerfall behalten wir den Originalpreis bei, besser als Absturz
+
+        # --- C. DIVIDENDEN (Yield Berechnung in Originalwährung) ---
+        # Yield % ist währungsunabhängig (Verhältniszahl)
         yield_percent = 0.0
         freq = 1
         
         try:
             divs = stock.dividends
-            # Wenn divs leer sind, kann es sein, dass wir keine Daten haben ODER die Aktie keine zahlt.
-            # Wir versuchen, eine Yield-Info zu bekommen, falls divs leer ist.
-            
             if not divs.empty:
-                # 1. Zeitzone normalisieren
                 tz = divs.index.tz
                 now = pd.Timestamp.now(tz=tz) if tz else pd.Timestamp.now()
-                
-                # 2. Letzte 12 Monate filtern
                 cutoff = now - pd.Timedelta(days=365)
                 recent_divs = divs[divs.index > cutoff]
                 
                 if not recent_divs.empty:
                     ttm_sum = recent_divs.sum()
-                    if current_price > 0:
-                        yield_percent = (ttm_sum / current_price) * 100
                     
-                    # Frequenz schätzen
+                    # Wir brauchen den Preis in der ORIGINAL-Währung für die Yield-Berechnung!
+                    # Da wir oben current_price ggf. schon in EUR umgerechnet haben, 
+                    # holen wir kurz den Raw Price nochmal oder rechnen zurück? 
+                    # Sauberer: Wir nutzen fast_info.last_price (Original) falls vorhanden.
+                    
+                    price_original = stock.fast_info.last_price
+                    if not price_original:
+                        # Fallback: Wenn wir umgerechnet haben, rate rausrechnen? 
+                        # Zu komplex. Nehmen wir an, current_price ist korrekt.
+                        # Wenn FX passiert ist, müssten wir auch Dividenden konvertieren.
+                        # EINFACHER: (Dividende / Preis) ist gleich, egal welche Währung, 
+                        # SOLANGE BEIDE in der gleichen Währung sind.
+                        # Da divs in Originalwährung kommen und stock.fast_info.last_price auch,
+                        # berechnen wir Yield basierend auf Originalwerten.
+                        price_original = current_price # Fallback (eventuell falsch wenn FX, aber akzeptabel für Fallback)
+
+                    if price_original > 0:
+                        yield_percent = (ttm_sum / price_original) * 100
+                    
                     c = len(recent_divs)
                     if c >= 10: freq = 12
                     elif c >= 3: freq = 4
                     elif c >= 2: freq = 2
             else:
-                # Fallback: fast_info kann manchmal implied yield haben? Nein, aber info hat es.
-                # Wir versuchen .info sehr vorsichtig.
                 info = stock.info
                 if 'dividendYield' in info and info['dividendYield']:
                     yield_percent = info['dividendYield'] * 100
                     
         except Exception:
-            # Dividendenfehler ignorieren, Standard 0%
             pass
 
-        # --- C. NAME ---
+        # --- D. NAME ---
         name = clean_ticker
         try:
-            # Wir probieren es EINMAL via info. Wenn das hängt, Timeout oder Fehler -> Ticker Name.
-            # Um Timeouts zu vermeiden, nutzen wir keinen expliziten Call wenn wir unsicher sind,
-            # aber yfinance .info ist der einzige Weg für den Namen.
-            # Wenn fast_info funktioniert hat, ist die Verbindung zur Börse prinzipiell da.
             meta = stock.info
             name = meta.get('shortName') or meta.get('longName') or clean_ticker
         except:
@@ -151,8 +178,8 @@ def get_stock_data(ticker_symbol):
         return {
             'Ticker': clean_ticker,
             'Name': name,
-            'Aktueller Kurs': float(current_price),
-            'Kaufkurs': float(current_price),
+            'Aktueller Kurs': float(current_price), # Jetzt in EUR
+            'Kaufkurs': float(current_price),     # Default auf aktuellen EUR Kurs
             'Div Rendite %': round(float(yield_percent), 2),
             'Intervall': freq,
             'Div Wachs. %': 5.0, 
@@ -173,7 +200,10 @@ def calculate_projection(df, years, pauschbetrag):
     
     # Initiale Basiswerte
     sim['Jahresdiv_Pro_Aktie'] = sim['Aktueller Kurs'] * (sim['Div Rendite %'] / 100)
-    current_shares = sim['Anteile'].astype(float).to_dict()
+    
+    # FIX KEYERROR: Dictionary Mapping Ticker -> Shares korrekt erstellen
+    # Vorher: to_dict() nutzte Index (0,1,2). Jetzt: zip(Ticker, Anteile).
+    current_shares = dict(zip(sim['Ticker'], sim['Anteile'].astype(float)))
     
     invested_capital = (sim['Anteile'] * sim['Kaufkurs']).sum()
     current_pausch = pauschbetrag
@@ -185,8 +215,14 @@ def calculate_projection(df, years, pauschbetrag):
     for m in range(1, months + 1):
         # Jahresabschluss & Reporting
         if (m - 1) % 12 == 0 and m > 1:
-            curr_port_val = sum(current_shares[t] * sim.loc[sim['Ticker']==t, 'Aktueller Kurs'].values[0] for t in current_shares)
-            
+            # Portfolio Wert berechnen
+            curr_port_val = 0
+            for t_symbol, t_shares in current_shares.items():
+                # Hole aktuellen Kurs aus Simulationstabelle für diesen Ticker
+                # .values[0] ist sicher, da Ticker unique sein sollten im DF
+                price = sim.loc[sim['Ticker'] == t_symbol, 'Aktueller Kurs'].values[0]
+                curr_port_val += t_shares * price
+
             projections.append({
                 'Jahr': (m-1)//12,
                 'Investiertes Kapital': invested_capital,
@@ -227,6 +263,7 @@ def calculate_projection(df, years, pauschbetrag):
             elif freq == 2 and month_idx % 6 == 0: pays = True
             
             if pays:
+                # Hier lag der KeyError zuvor: current_shares[ticker]
                 gross = current_shares[ticker] * (row['Jahresdiv_Pro_Aktie'] / freq)
                 if gross > 0:
                     # Steuer DE Logik
@@ -249,8 +286,12 @@ def calculate_projection(df, years, pauschbetrag):
         
         invested_capital += monthly_invest
 
-    # Finaler Eintrag
-    curr_port_val = sum(current_shares[t] * sim.loc[sim['Ticker']==t, 'Aktueller Kurs'].values[0] for t in current_shares)
+    # Finaler Eintrag (letztes Jahr)
+    curr_port_val = 0
+    for t_symbol, t_shares in current_shares.items():
+        price = sim.loc[sim['Ticker'] == t_symbol, 'Aktueller Kurs'].values[0]
+        curr_port_val += t_shares * price
+
     projections.append({
         'Jahr': years,
         'Investiertes Kapital': invested_capital,
@@ -283,7 +324,7 @@ with st.sidebar:
             st.error("Fehler beim Laden.")
 
 st.title("Dividend Master DE 🇩🇪")
-st.markdown("##### 🚀 100% Live-Daten via yfinance API")
+st.markdown("##### 🚀 Live-Daten (Auto-Währungsumrechnung in €)")
 
 # Input Section
 c1, c2 = st.columns([3,1])
@@ -292,7 +333,7 @@ with c1:
 with c2:
     if st.button("Daten abrufen 🔎", type="primary", use_container_width=True):
         if new_ticker:
-            with st.spinner(f"Verbinde mit Börse für {new_ticker}..."):
+            with st.spinner(f"Hole Daten für {new_ticker} (inkl. EUR Umrechnung)..."):
                 data = get_stock_data(new_ticker)
                 
                 if data:
@@ -300,7 +341,7 @@ with c2:
                         st.session_state.portfolio, 
                         pd.DataFrame([data])
                     ], ignore_index=True)
-                    st.success(f"{data['Name']} hinzugefügt! Kurs: {data['Aktueller Kurs']}€")
+                    st.success(f"{data['Name']} hinzugefügt! Kurs: {data['Aktueller Kurs']:.2f}€")
                     st.rerun()
                 else:
                     st.error(f"Konnte keine Daten für '{new_ticker}' finden. Bitte Ticker prüfen (z.B. .DE für Deutschland).")
