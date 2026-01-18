@@ -46,102 +46,123 @@ if 'portfolio' not in st.session_state:
         'Sparrate €', 'Intervall', 'Reinvest'
     ])
 
-# --- PROFESSIONAL YFINANCE FETCHING (v3.0 Robust) ---
+# --- PROFESSIONAL YFINANCE FETCHING (v4.0 Bulletproof) ---
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_data(ticker_symbol):
     """
-    Holt Daten via yfinance. Priorisiert 'history' für Preis (sehr stabil).
-    Vermeidet Absturz, wenn .info (Name) blockiert wird.
+    Holt Daten via yfinance.
+    Strategie: fast_info (Metadata) > history (API) > download (Bulk API).
     """
     clean_ticker = ticker_symbol.upper().strip()
     
     try:
-        # 1. Custom Session (Wichtig gegen Rate Limits)
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        })
+        # 1. Ticker Objekt erstellen
+        # WICHTIG: Keine Session erzwingen, yfinance verwaltet das intern oft besser in neueren Versionen
+        stock = yf.Ticker(clean_ticker)
         
-        stock = yf.Ticker(clean_ticker, session=session)
+        # --- A. PREIS ERMITTLUNG ---
+        current_price = None
         
-        # --- A. PREIS (Via History - Stabilste Methode) ---
-        # Wir holen 5 Tage Historie. Das deckt Wochenenden/Feiertage ab.
+        # Versuch 1: fast_info (Sehr schnell, wenig Overhead)
         try:
-            hist = stock.history(period="5d")
-        except Exception:
-            # Falls API blockiert, retry mit Standard
-            stock = yf.Ticker(clean_ticker) 
-            hist = stock.history(period="5d")
-
-        if hist.empty:
-            print(f"Keine History Daten für {clean_ticker}")
-            return None
+            current_price = stock.fast_info.last_price
+        except:
+            pass
             
-        # Nimm den letzten verfügbaren Schlusskurs (Close)
-        current_price = float(hist['Close'].iloc[-1])
-        
-        # --- B. DIVIDENDE (TTM Berechnung aus Historie) ---
+        # Versuch 2: history (Der Standard-Weg)
+        if current_price is None or pd.isna(current_price):
+            try:
+                hist = stock.history(period="5d")
+                if not hist.empty:
+                    current_price = hist['Close'].iloc[-1]
+            except:
+                pass
+
+        # Versuch 3: download (Nuclear Option - holt kompletten DataFrame)
+        if current_price is None or pd.isna(current_price):
+            try:
+                # threads=False verhindert oft Threading-Probleme in Streamlit
+                df = yf.download(clean_ticker, period="5d", progress=False, threads=False)
+                if not df.empty:
+                    # In neuen yfinance Versionen kann das MultiIndex sein
+                    if isinstance(df.columns, pd.MultiIndex):
+                        current_price = df.xs('Close', axis=1, level=0).iloc[-1].iloc[0] # Sehr tiefer Griff
+                    else:
+                        current_price = df['Close'].iloc[-1]
+            except Exception as e:
+                print(f"Download Fallback failed: {e}")
+
+        # Wenn wir immer noch keinen Preis haben, Abbruch.
+        if current_price is None or pd.isna(current_price):
+            return None
+
+        # --- B. DIVIDENDEN (Yield Berechnung) ---
         yield_percent = 0.0
-        freq = 1 # Default: Jährlich
+        freq = 1
         
         try:
             divs = stock.dividends
+            # Wenn divs leer sind, kann es sein, dass wir keine Daten haben ODER die Aktie keine zahlt.
+            # Wir versuchen, eine Yield-Info zu bekommen, falls divs leer ist.
+            
             if not divs.empty:
-                # Zeitzonen-Problematik fixen
+                # 1. Zeitzone normalisieren
                 tz = divs.index.tz
-                if tz is None:
-                    now = pd.Timestamp.now()
-                else:
-                    now = pd.Timestamp.now(tz=tz)
+                now = pd.Timestamp.now(tz=tz) if tz else pd.Timestamp.now()
                 
-                # Filtere Dividenden der letzten 365 Tage
+                # 2. Letzte 12 Monate filtern
                 cutoff = now - pd.Timedelta(days=365)
                 recent_divs = divs[divs.index > cutoff]
                 
                 if not recent_divs.empty:
-                    ttm_div_sum = recent_divs.sum()
+                    ttm_sum = recent_divs.sum()
                     if current_price > 0:
-                        yield_percent = (ttm_div_sum / current_price) * 100
+                        yield_percent = (ttm_sum / current_price) * 100
                     
                     # Frequenz schätzen
-                    count = len(recent_divs)
-                    if count >= 10: freq = 12   # Monthly
-                    elif count >= 3: freq = 4   # Quarterly
-                    elif count >= 2: freq = 2   # Semi
-        except Exception as e:
-            # Falls Dividenden-Berechnung fehlschlägt, ist das kein Beinbruch -> Yield = 0
-            print(f"Dividenden-Fehler bei {clean_ticker}: {e}")
+                    c = len(recent_divs)
+                    if c >= 10: freq = 12
+                    elif c >= 3: freq = 4
+                    elif c >= 2: freq = 2
+            else:
+                # Fallback: fast_info kann manchmal implied yield haben? Nein, aber info hat es.
+                # Wir versuchen .info sehr vorsichtig.
+                info = stock.info
+                if 'dividendYield' in info and info['dividendYield']:
+                    yield_percent = info['dividendYield'] * 100
+                    
+        except Exception:
+            # Dividendenfehler ignorieren, Standard 0%
             pass
 
-        # --- C. NAME (Optional via .info) ---
-        # Das ist der heikle Teil, der oft blockiert wird.
-        # Wir packen ihn in einen eigenen Try-Block. Wenn er fehlschlägt, nehmen wir den Ticker.
+        # --- C. NAME ---
         name = clean_ticker
         try:
-            # Versuch, Metadaten zu laden
-            meta = stock.info 
-            if meta:
-                name = meta.get('shortName') or meta.get('longName') or clean_ticker
-        except Exception:
-            # Fallback: Ticker ist Name. Hauptsache wir haben Preis und Dividende.
+            # Wir probieren es EINMAL via info. Wenn das hängt, Timeout oder Fehler -> Ticker Name.
+            # Um Timeouts zu vermeiden, nutzen wir keinen expliziten Call wenn wir unsicher sind,
+            # aber yfinance .info ist der einzige Weg für den Namen.
+            # Wenn fast_info funktioniert hat, ist die Verbindung zur Börse prinzipiell da.
+            meta = stock.info
+            name = meta.get('shortName') or meta.get('longName') or clean_ticker
+        except:
             pass
 
         return {
             'Ticker': clean_ticker,
             'Name': name,
-            'Aktueller Kurs': round(current_price, 2),
-            'Kaufkurs': round(current_price, 2),
-            'Div Rendite %': round(yield_percent, 2),
+            'Aktueller Kurs': float(current_price),
+            'Kaufkurs': float(current_price),
+            'Div Rendite %': round(float(yield_percent), 2),
             'Intervall': freq,
-            'Div Wachs. %': 5.0, # Konservativer Default
-            'Kurs Wachs. %': 6.0, # Markt-Durchschnitt
+            'Div Wachs. %': 5.0, 
+            'Kurs Wachs. %': 6.0, 
             'Sparrate €': 0.0,
             'Reinvest': True
         }
 
     except Exception as e:
-        print(f"Kritischer Fehler bei {clean_ticker}: {e}")
+        print(f"Fatal error fetching {clean_ticker}: {e}")
         return None
 
 def calculate_projection(df, years, pauschbetrag):
