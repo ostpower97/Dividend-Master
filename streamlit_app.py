@@ -46,104 +46,102 @@ if 'portfolio' not in st.session_state:
         'Sparrate €', 'Intervall', 'Reinvest'
     ])
 
-# --- PROFESSIONAL YFINANCE FETCHING (v2.0 optimized) ---
+# --- PROFESSIONAL YFINANCE FETCHING (v3.0 Robust) ---
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_data(ticker_symbol):
     """
-    Holt Daten via yfinance 'fast_info' und berechnet Yield manuell über Historie (TTM).
-    Viel robuster als .info Scraping.
+    Holt Daten via yfinance. Priorisiert 'history' für Preis (sehr stabil).
+    Vermeidet Absturz, wenn .info (Name) blockiert wird.
     """
     clean_ticker = ticker_symbol.upper().strip()
     
     try:
-        # 1. Custom Session (immer gut gegen Blocks)
+        # 1. Custom Session (Wichtig gegen Rate Limits)
         session = requests.Session()
         session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
         
         stock = yf.Ticker(clean_ticker, session=session)
         
-        # --- A. PREIS (Nutze fast_info, das ist sehr zuverlässig) ---
-        price = None
+        # --- A. PREIS (Via History - Stabilste Methode) ---
+        # Wir holen 5 Tage Historie. Das deckt Wochenenden/Feiertage ab.
         try:
-            # fast_info triggert keinen Web-Scrape, sondern nutzt API-Metadaten
-            price = stock.fast_info.last_price
-        except:
-            pass
-            
-        # Fallback auf History, falls fast_info leer (z.B. bei manchen ETFs)
-        if price is None:
             hist = stock.history(period="5d")
-            if not hist.empty:
-                price = hist['Close'].iloc[-1]
-        
-        if price is None:
-            raise ValueError(f"Kein Preis für {clean_ticker} ermittelbar.")
+        except Exception:
+            # Falls API blockiert, retry mit Standard
+            stock = yf.Ticker(clean_ticker) 
+            hist = stock.history(period="5d")
 
-        # --- B. DIVIDENDE (Berechne TTM - Trailing Twelve Months) ---
-        # Das ist genauer als .info['dividendYield'], welches oft fehlt
+        if hist.empty:
+            print(f"Keine History Daten für {clean_ticker}")
+            return None
+            
+        # Nimm den letzten verfügbaren Schlusskurs (Close)
+        current_price = float(hist['Close'].iloc[-1])
+        
+        # --- B. DIVIDENDE (TTM Berechnung aus Historie) ---
         yield_percent = 0.0
-        freq = 1
+        freq = 1 # Default: Jährlich
         
         try:
-            # Hole Dividenden-Historie
             divs = stock.dividends
             if not divs.empty:
-                # Zeitzone normalisieren für Vergleich
-                now = pd.Timestamp.now().tz_localize(divs.index.tz)
-                one_year_ago = now - pd.Timedelta(days=365)
+                # Zeitzonen-Problematik fixen
+                tz = divs.index.tz
+                if tz is None:
+                    now = pd.Timestamp.now()
+                else:
+                    now = pd.Timestamp.now(tz=tz)
                 
-                # Summiere alles im letzten Jahr
-                last_12m_divs = divs[divs.index >= one_year_ago]
+                # Filtere Dividenden der letzten 365 Tage
+                cutoff = now - pd.Timedelta(days=365)
+                recent_divs = divs[divs.index > cutoff]
                 
-                ttm_div_sum = last_12m_divs.sum()
-                count = len(last_12m_divs)
-                
-                if price > 0:
-                    yield_percent = (ttm_div_sum / price) * 100
-                
-                # Frequenz ableiten
-                if count >= 10: freq = 12   # Monthly
-                elif count >= 3: freq = 4   # Quarterly
-                elif count >= 2: freq = 2   # Semi-Annual
-                elif count >= 1: freq = 1   # Annual
+                if not recent_divs.empty:
+                    ttm_div_sum = recent_divs.sum()
+                    if current_price > 0:
+                        yield_percent = (ttm_div_sum / current_price) * 100
+                    
+                    # Frequenz schätzen
+                    count = len(recent_divs)
+                    if count >= 10: freq = 12   # Monthly
+                    elif count >= 3: freq = 4   # Quarterly
+                    elif count >= 2: freq = 2   # Semi
         except Exception as e:
-            # Wenn Berechnung fehlschlägt, versuche .info als allerletzten Strohhalm
-            try:
-                info = stock.info
-                yield_percent = (info.get('dividendYield') or 0) * 100
-            except:
-                pass
+            # Falls Dividenden-Berechnung fehlschlägt, ist das kein Beinbruch -> Yield = 0
+            print(f"Dividenden-Fehler bei {clean_ticker}: {e}")
+            pass
 
-        # --- C. NAME ---
+        # --- C. NAME (Optional via .info) ---
+        # Das ist der heikle Teil, der oft blockiert wird.
+        # Wir packen ihn in einen eigenen Try-Block. Wenn er fehlschlägt, nehmen wir den Ticker.
         name = clean_ticker
         try:
-            # Versuche Name zu holen, aber lass es nicht crashen wenn es fehlschlägt
-            # Wir nutzen fast_info headers oder fallback info
-            # Leider hat fast_info keinen Namen, daher vorsichtiger .info call
-            # Wir nutzen einen Trick: Wenn der User .DE eingibt, ist es oft klar
-            info = stock.info
-            name = info.get('shortName') or info.get('longName') or clean_ticker
-        except:
+            # Versuch, Metadaten zu laden
+            meta = stock.info 
+            if meta:
+                name = meta.get('shortName') or meta.get('longName') or clean_ticker
+        except Exception:
+            # Fallback: Ticker ist Name. Hauptsache wir haben Preis und Dividende.
             pass
 
         return {
             'Ticker': clean_ticker,
             'Name': name,
-            'Aktueller Kurs': float(price),
-            'Kaufkurs': float(price),
-            'Div Rendite %': round(float(yield_percent), 2),
+            'Aktueller Kurs': round(current_price, 2),
+            'Kaufkurs': round(current_price, 2),
+            'Div Rendite %': round(yield_percent, 2),
             'Intervall': freq,
-            'Div Wachs. %': 5.0, 
-            'Kurs Wachs. %': 6.0, 
+            'Div Wachs. %': 5.0, # Konservativer Default
+            'Kurs Wachs. %': 6.0, # Markt-Durchschnitt
             'Sparrate €': 0.0,
             'Reinvest': True
         }
 
     except Exception as e:
-        print(f"ERROR bei {clean_ticker}: {e}")
+        print(f"Kritischer Fehler bei {clean_ticker}: {e}")
         return None
 
 def calculate_projection(df, years, pauschbetrag):
