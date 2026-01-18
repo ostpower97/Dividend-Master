@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import numpy as np
+import time
 
 # --- KONFIGURATION ---
 st.set_page_config(
@@ -57,6 +58,31 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- STATIC FALLBACK DATA (Wenn Yahoo blockiert) ---
+STATIC_FALLBACK_DATA = {
+    'O': {'Name': 'Realty Income', 'Price': 53.50, 'Yield': 5.8, 'Freq': 12},
+    'MAIN': {'Name': 'Main Street Capital', 'Price': 50.20, 'Yield': 6.0, 'Freq': 12},
+    'MSFT': {'Name': 'Microsoft Corp.', 'Price': 405.00, 'Yield': 0.7, 'Freq': 4},
+    'AAPL': {'Name': 'Apple Inc.', 'Price': 175.00, 'Yield': 0.5, 'Freq': 4},
+    'ALV.DE': {'Name': 'Allianz SE', 'Price': 290.00, 'Yield': 5.2, 'Freq': 1},
+    'MUV2.DE': {'Name': 'Münchener Rück', 'Price': 475.00, 'Yield': 3.3, 'Freq': 1},
+    'BAS.DE': {'Name': 'BASF SE', 'Price': 46.00, 'Yield': 7.2, 'Freq': 1},
+    'DTE.DE': {'Name': 'Deutsche Telekom', 'Price': 23.00, 'Yield': 3.5, 'Freq': 1},
+    'JNJ': {'Name': 'Johnson & Johnson', 'Price': 148.00, 'Yield': 3.0, 'Freq': 4},
+    'PG': {'Name': 'Procter & Gamble', 'Price': 162.00, 'Yield': 2.4, 'Freq': 4},
+    'KO': {'Name': 'Coca-Cola', 'Price': 60.00, 'Yield': 3.1, 'Freq': 4},
+    'PEP': {'Name': 'PepsiCo', 'Price': 165.00, 'Yield': 3.0, 'Freq': 4},
+    'MCD': {'Name': 'McDonald\'s', 'Price': 270.00, 'Yield': 2.3, 'Freq': 4},
+    'NESN.SW': {'Name': 'Nestlé', 'Price': 94.00, 'Yield': 3.0, 'Freq': 1},
+    'ROG.SW': {'Name': 'Roche', 'Price': 225.00, 'Yield': 4.0, 'Freq': 1},
+    'NOVN.SW': {'Name': 'Novartis', 'Price': 88.00, 'Yield': 3.8, 'Freq': 1},
+    'SHEL': {'Name': 'Shell', 'Price': 32.00, 'Yield': 3.9, 'Freq': 4},
+    'BMW.DE': {'Name': 'BMW AG', 'Price': 102.00, 'Yield': 5.5, 'Freq': 1},
+    'VNA.DE': {'Name': 'Vonovia SE', 'Price': 28.00, 'Yield': 3.1, 'Freq': 1},
+    'ADC': {'Name': 'Agree Realty', 'Price': 62.00, 'Yield': 4.7, 'Freq': 12},
+    'STAG': {'Name': 'STAG Industrial', 'Price': 37.00, 'Yield': 4.0, 'Freq': 12},
+}
+
 # --- SESSION STATE INITIALISIERUNG ---
 if 'portfolio' not in st.session_state:
     # Default Portfolio Structure
@@ -68,48 +94,89 @@ if 'portfolio' not in st.session_state:
 
 # --- HELPER FUNCTIONS ---
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_data(ticker_symbol):
-    """Zieht Live-Daten via yfinance und ermittelt die Ausschüttungsfrequenz."""
+    """
+    Zieht Daten mit Caching (1 Stunde) und Fallback-Mechanismus.
+    Vermeidet 'Too Many Requests' Abstürze.
+    """
+    clean_ticker = ticker_symbol.upper().strip()
+    
+    # 1. Versuch: yfinance (Live Daten)
     try:
-        stock = yf.Ticker(ticker_symbol)
-        info = stock.info
+        stock = yf.Ticker(clean_ticker)
+        # Fast access to info (minimizes request load)
+        info = stock.info 
         
-        # Basisdaten
+        # Validierung: Hat die Antwort Daten?
         price = info.get('currentPrice', info.get('regularMarketPreviousClose', 0))
-        name = info.get('shortName', ticker_symbol)
+        if price == 0 or price is None:
+            raise ValueError("Kein Preis gefunden")
+
+        name = info.get('shortName', clean_ticker)
         yield_val = info.get('dividendYield', 0) * 100 if info.get('dividendYield') else 0
         
-        # Frequenz-Analyse
-        hist = stock.dividends
-        if not hist.empty:
-            last_year = hist.last('12mo')
-            count = len(last_year)
-            if count >= 10: freq = 12
-            elif count >= 3: freq = 4
-            elif count >= 1: freq = 1
-            else: freq = 1
-        else:
-            freq = 1 
+        # Frequenz schätzen (braucht History, oft Fehlerquelle bei Rate Limit)
+        # Wir machen das defensiv
+        freq = 1
+        try:
+            hist = stock.dividends
+            if not hist.empty:
+                last_year = hist.last('12mo')
+                count = len(last_year)
+                if count >= 10: freq = 12
+                elif count >= 3: freq = 4
+                elif count >= 1: freq = 1
+        except:
+            pass # Behalte default 1 bei Fehler
 
         return {
-            'Ticker': ticker_symbol.upper(),
+            'Ticker': clean_ticker,
             'Name': name,
             'Aktueller Kurs': price,
-            'Kaufkurs': price, # Default to current price for new entries
+            'Kaufkurs': price,
             'Div Rendite %': round(yield_val, 2),
             'Intervall': freq,
-            'Div Wachs. %': 5.0, # Conservative default
+            'Div Wachs. %': 5.0,
             'Kurs Wachs. %': 5.0,
-            'Reinvest': True
+            'Reinvest': True,
+            'Source': 'Live'
         }
+
     except Exception as e:
-        st.error(f"Fehler bei Ticker {ticker_symbol}: {e}")
-        return None
+        # 2. Versuch: Fallback Datenbank
+        if clean_ticker in STATIC_FALLBACK_DATA:
+            data = STATIC_FALLBACK_DATA[clean_ticker]
+            return {
+                'Ticker': clean_ticker,
+                'Name': data['Name'],
+                'Aktueller Kurs': data['Price'],
+                'Kaufkurs': data['Price'],
+                'Div Rendite %': data['Yield'],
+                'Intervall': data['Freq'],
+                'Div Wachs. %': 5.0,
+                'Kurs Wachs. %': 5.0,
+                'Reinvest': True,
+                'Source': 'Fallback'
+            }
+        
+        # 3. Versuch: Manuelles Template zurückgeben (statt Fehler)
+        return {
+            'Ticker': clean_ticker,
+            'Name': 'Bitte Daten eingeben',
+            'Aktueller Kurs': 0.0,
+            'Kaufkurs': 0.0,
+            'Div Rendite %': 0.0,
+            'Intervall': 1,
+            'Div Wachs. %': 5.0,
+            'Kurs Wachs. %': 5.0,
+            'Reinvest': True,
+            'Source': 'Manual'
+        }
 
 def calculate_projection(df, years, pauschbetrag):
     """
     Simuliert die Portfolio-Entwicklung monatlich.
-    Berücksichtigt: Sparpläne, Reinvestition, Steuern, Kurssteigerung, Dividendensteigerung.
     """
     months = years * 12
     projections = []
@@ -179,7 +246,7 @@ def calculate_projection(df, years, pauschbetrag):
             # 2. Dividenden & Reinvest
             pays_this_month = False
             if freq == 12: pays_this_month = True
-            elif freq == 4 and month_index % 3 == 0: pays_this_month = True # Mär, Jun, Sep, Dez Schema vereinfacht
+            elif freq == 4 and month_index % 3 == 0: pays_this_month = True 
             elif freq == 2 and month_index % 6 == 0: pays_this_month = True
             elif freq == 1 and month_index == 5: pays_this_month = True 
 
@@ -205,7 +272,7 @@ def calculate_projection(df, years, pauschbetrag):
                     year_net += net_payout
                     year_tax += tax
                     
-                    # Reinvest (DRIP) - Erhöht NICHT 'Investiertes Kapital' (da aus Gewinn), aber erhöht Anteile
+                    # Reinvest (DRIP)
                     if row['Reinvest']:
                         drip_shares = net_payout / sim_data.at[idx, 'Aktueller Kurs']
                         current_shares[ticker] += drip_shares
@@ -256,45 +323,49 @@ with st.sidebar:
     if uploaded_file is not None:
         try:
             df_uploaded = pd.read_csv(uploaded_file)
-            # Ensure compatibility
             required_cols = ['Ticker', 'Anteile', 'Kaufkurs']
             if all(col in df_uploaded.columns for col in required_cols):
                 st.session_state.portfolio = df_uploaded
                 st.success("Erfolgreich geladen!")
                 st.rerun()
             else:
-                st.error("CSV Format falsch. Benötigt Spalten: Ticker, Anteile, Kaufkurs...")
+                st.error("CSV Format falsch.")
         except:
             st.error("Datei konnte nicht gelesen werden.")
 
 # Main Content
 st.title("💰 Dividend Master DE")
-st.caption("Realtime-Kurse via yfinance | Deutsche Steuerlogik | Zinseszins-Prognose")
+st.caption("Realtime-Kurse via yfinance (Cached) | Deutsche Steuerlogik | Zinseszins-Prognose")
 
 # 1. ADD TICKER
 col1, col2 = st.columns([3, 1])
 with col1:
-    new_ticker = st.text_input("Ticker Symbol (z.B. O, MSFT, ALV.DE, NESN.SW)", placeholder="Symbol eingeben...")
+    new_ticker = st.text_input("Ticker Symbol (z.B. O, MSFT, ALV.DE)", placeholder="Symbol eingeben...")
 with col2:
     st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
     if st.button("Hinzufügen 🚀", use_container_width=True):
         if new_ticker:
             with st.spinner(f"Lade Daten für {new_ticker}..."):
                 stock_data = get_stock_data(new_ticker)
-                if stock_data:
-                    # Append to portfolio
-                    st.session_state.portfolio = pd.concat([
-                        st.session_state.portfolio, 
-                        pd.DataFrame([stock_data])
-                    ], ignore_index=True)
-                    st.success(f"{stock_data['Name']} hinzugefügt!")
-                    st.rerun()
+                
+                # Feedback an User
+                if stock_data['Source'] == 'Fallback':
+                    st.toast(f"⚠️ Yahoo überlastet. Nutze gespeicherte Daten für {stock_data['Ticker']}.", icon="ℹ️")
+                elif stock_data['Source'] == 'Manual':
+                    st.warning("Keine Daten gefunden (API Limit). Bitte trage Kurs/Dividende manuell ein.")
+
+                # Append to portfolio
+                st.session_state.portfolio = pd.concat([
+                    st.session_state.portfolio, 
+                    pd.DataFrame([stock_data])
+                ], ignore_index=True)
+                
+                st.rerun()
 
 # 2. PORTFOLIO TABLE
 st.subheader("Dein Portfolio")
 if not st.session_state.portfolio.empty:
     
-    # WICHTIG: Kaufkurs ist editierbar
     edited_df = st.data_editor(
         st.session_state.portfolio,
         num_rows="dynamic",
@@ -302,21 +373,21 @@ if not st.session_state.portfolio.empty:
             "Ticker": st.column_config.TextColumn(disabled=True),
             "Name": st.column_config.TextColumn(disabled=True),
             "Kaufkurs": st.column_config.NumberColumn("Ø Kaufkurs €", format="%.2f €", help="Dein durchschnittlicher Einkaufspreis"),
-            "Aktueller Kurs": st.column_config.NumberColumn(format="%.2f €", disabled=True),
+            "Aktueller Kurs": st.column_config.NumberColumn("Aktuell €", format="%.2f €"),
             "Anteile": st.column_config.NumberColumn(format="%.2f"),
             "Div Rendite %": st.column_config.NumberColumn("Div %", format="%.2f %%"),
             "Div Wachs. %": st.column_config.NumberColumn("Div CAGR %", format="%.1f %%"),
             "Kurs Wachs. %": st.column_config.NumberColumn("Kurs CAGR %", format="%.1f %%"),
             "Sparrate €": st.column_config.NumberColumn(format="%.0f €"),
             "Intervall": st.column_config.SelectboxColumn("Intervall", options=[1, 2, 4, 12]),
-            "Reinvest": st.column_config.CheckboxColumn("Auto-Reinvest", default=True)
+            "Reinvest": st.column_config.CheckboxColumn("Auto-Reinvest", default=True),
+            "Source": st.column_config.TextColumn("Quelle", disabled=True, width="small")
         },
         use_container_width=True,
         hide_index=True,
         key="editor"
     )
     
-    # Save back to state
     st.session_state.portfolio = edited_df
 
     # 3. PROGNOSEN & DASHBOARD
@@ -344,11 +415,9 @@ if not st.session_state.portfolio.empty:
         tab1, tab2 = st.tabs(["📊 Dashboard & KPIs", "📈 Detaillierte Tabelle"])
         
         with tab1:
-            # Slider for specific year view
             view_year = st.slider("Jahr im Detail ansehen:", 1, years_to_project, years_to_project)
             row = df_proj[df_proj['Jahr'] == view_year].iloc[0]
             
-            # Metrics Row
             m1, m2, m3, m4 = st.columns(4)
             with m1:
                 st.markdown(f"""<div class="metric-card"><div class="metric-label">Ø Monatlich (Netto)</div><div class="metric-value highlight-teal">{row['Netto Dividende']/12:,.0f} €</div><div class="metric-sub">Verfügbar</div></div>""", unsafe_allow_html=True)
@@ -360,14 +429,12 @@ if not st.session_state.portfolio.empty:
                 st.markdown(f"""<div class="metric-card"><div class="metric-label">Persönliche Rendite</div><div class="metric-value highlight-purple">{row['Yield on Cost %']:.1f} %</div><div class="metric-sub">Yield on Cost</div></div>""", unsafe_allow_html=True)
 
             st.markdown("### 📈 Vermögensentwicklung")
-            
-            # Area Chart: Invested vs Value
             chart_data = df_proj[['Jahr', 'Investiertes Kapital', 'Portfolio Wert']].set_index('Jahr')
-            st.area_chart(chart_data, color=["#4b5563", "#2dd4bf"]) # Grey for Invested, Teal for Value
+            st.area_chart(chart_data, color=["#4b5563", "#2dd4bf"])
             
             st.markdown("### 💸 Dividenden-Strom")
             div_data = df_proj[['Jahr', 'Netto Dividende', 'Steuern']].set_index('Jahr')
-            st.bar_chart(div_data, color=["#2dd4bf", "#ef4444"]) # Teal Net, Red Taxes
+            st.bar_chart(div_data, color=["#2dd4bf", "#ef4444"])
 
         with tab2:
             st.dataframe(df_proj.style.format({
