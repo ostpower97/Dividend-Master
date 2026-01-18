@@ -1,411 +1,415 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import requests
-import numpy as np
 import os
-from datetime import datetime, timedelta
+import time
 
-# --- KONFIGURATION ---
+# --- 1. CONFIG & CSS (FORCE LIGHT THEME & MOBILE OPTIMIZATION) ---
 st.set_page_config(
-    page_title="Dividend Master DE",
+    page_title="Dividend Master",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# --- CSS STYLING (HARDCORE LIGHT MODE) ---
 st.markdown("""
 <style>
-    /* Global Background */
-    [data-testid="stAppViewContainer"] {
-        background-color: #f8fafc !important; /* Sehr helles Grau/Weiß */
-        color: #0f172a !important;
+    /* Force Light Mode Background & Text */
+    .stApp {
+        background-color: #f8fafc;
+        color: #0f172a;
     }
     
-    /* Sidebar */
-    [data-testid="stSidebar"] {
+    /* Input Fields White */
+    input, select, textarea, [data-baseweb="select"] {
         background-color: #ffffff !important;
-        border-right: 1px solid #e2e8f0;
-    }
-    
-    /* Typography */
-    h1, h2, h3, h4, h5, h6, p, label, span, div, li {
         color: #0f172a !important;
-        font-family: 'Inter', sans-serif;
+        border-color: #cbd5e1 !important;
     }
     
-    /* EXTREME TABLE FIXES (MOBILE & DARK MODE) */
-    [data-testid="stDataFrame"] {
+    /* Cards / Containers White */
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        background-color: #ffffff;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    }
+
+    /* DataFrame / Editor White */
+    [data-testid="stDataFrame"], [data-testid="stDataEditor"] {
         background-color: #ffffff !important;
         border: 1px solid #e2e8f0 !important;
-        border-radius: 8px !important;
     }
-    [data-testid="stDataFrame"] * {
-        background-color: #ffffff !important;
+    
+    /* Metrics */
+    [data-testid="stMetricValue"] {
         color: #0f172a !important;
     }
-    /* Header Cells specific */
-    div[data-testid="stDataFrame"] div[role="columnheader"] {
-        background-color: #f1f5f9 !important; /* Light Gray Header */
-        color: #334155 !important;
-        font-weight: 800 !important;
-        border-bottom: 2px solid #e2e8f0 !important;
-    }
-    /* Data Cells specific */
-    div[data-testid="stDataFrame"] div[role="gridcell"] {
-        color: #0f172a !important;
-        border-bottom: 1px solid #f1f5f9 !important;
+    [data-testid="stMetricLabel"] {
+        color: #64748b !important;
     }
 
     /* Buttons */
     button[kind="primary"] {
-        background-color: #2563eb !important;
+        background-color: #0f172a !important;
+        color: white !important;
         border: none !important;
-        transition: all 0.2s ease;
+        transition: opacity 0.2s;
     }
     button[kind="primary"]:hover {
-        background-color: #1d4ed8 !important;
-        box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.3);
-    }
-    button[kind="primary"] * {
-        color: #ffffff !important;
+        opacity: 0.9;
     }
     
-    /* Inputs */
-    input, select, textarea {
-        color: #0f172a !important;
-        background-color: #ffffff !important;
-        border: 1px solid #cbd5e1 !important;
-    }
-
-    /* Metric Cards */
-    div[data-testid="metric-container"] {
-        background-color: #ffffff;
-        border: 1px solid #e2e8f0;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
-    }
-    [data-testid="stMetricLabel"] {
-        color: #64748b !important; 
-    }
-    
-    /* Hide Footer */
-    #MainMenu {visibility: hidden;}
+    /* Hide default header/footer for app-feel */
+    header {visibility: hidden;}
     footer {visibility: hidden;}
+    
+    /* Mobile Padding Fixes */
+    .block-container {
+        padding-top: 2rem !important;
+        padding-bottom: 5rem !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# --- LOCAL PERSISTENCE ---
+# --- 2. DATA PERSISTENCE (LOCAL STORAGE) ---
 CSV_FILE = "my_portfolio.csv"
 
-def load_portfolio():
-    # Versuche lokal zu laden
-    if os.path.exists(CSV_FILE):
-        try:
-            return pd.read_csv(CSV_FILE)
-        except:
-            pass
+def get_empty_portfolio():
     return pd.DataFrame(columns=[
         'Ticker', 'Name', 'Anteile', 'Kaufkurs', 'Aktueller Kurs', 
         'Div Rendite %', 'Div Wachs. %', 'Kurs Wachs. %', 
         'Sparrate €', 'Intervall', 'Reinvest'
     ])
 
-def save_portfolio(df):
-    # Speichert lokal in CSV (funktioniert gut lokal, im Web ephemeral)
-    try:
-        df.to_csv(CSV_FILE, index=False)
-    except Exception as e:
-        print(f"Fehler beim Speichern: {e}")
-
-# --- SESSION STATE INITIALIZATION ---
-if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = load_portfolio()
-
-# --- HELPER FUNCTIONS ---
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_stock_data(ticker_symbol):
-    clean_ticker = ticker_symbol.upper().strip()
-    try:
-        stock = yf.Ticker(clean_ticker)
-        
-        # 1. Price & Currency
-        current_price = None
+def load_data():
+    if os.path.exists(CSV_FILE):
         try:
-            current_price = stock.fast_info.last_price
+            df = pd.read_csv(CSV_FILE)
+            # Ensure all columns exist (migration safe)
+            defaults = get_empty_portfolio()
+            for col in defaults.columns:
+                if col not in df.columns:
+                    df[col] = defaults[col]
+            return df
         except:
             pass
+    return get_empty_portfolio()
+
+def save_data(df):
+    df.to_csv(CSV_FILE, index=False)
+
+# Init Session State
+if 'portfolio' not in st.session_state:
+    st.session_state.portfolio = load_data()
+
+# --- 3. MARKET DATA ENGINE (yfinance - ON DEMAND) ---
+def update_market_data(df):
+    """Holt frische Daten von yfinance und aktualisiert das DataFrame."""
+    if df.empty:
+        return df
+    
+    updated_df = df.copy()
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    total = len(df)
+    
+    for i, row in df.iterrows():
+        ticker = row['Ticker']
+        status_text.caption(f"Lade Daten für {ticker}...")
+        try:
+            stock = yf.Ticker(ticker)
             
-        if current_price is None or pd.isna(current_price):
+            # 1. Price
+            price = None
             try:
-                hist = stock.history(period="5d")
-                if not hist.empty:
-                    current_price = hist['Close'].iloc[-1]
+                price = stock.fast_info.last_price
+            except:
+                try:
+                    price = stock.history(period="1d")['Close'].iloc[-1]
+                except:
+                    pass
+            
+            if price:
+                updated_df.at[i, 'Aktueller Kurs'] = float(price)
+            
+            # 2. Dividend Yield
+            try:
+                info = stock.info
+                if 'dividendYield' in info and info['dividendYield']:
+                    updated_df.at[i, 'Div Rendite %'] = round(info['dividendYield'] * 100, 2)
             except:
                 pass
+                
+            # 3. Name fallback
+            if pd.isna(row['Name']) or row['Name'] == ticker:
+                try:
+                    name = stock.info.get('shortName') or stock.info.get('longName')
+                    if name:
+                        updated_df.at[i, 'Name'] = name
+                except:
+                    pass
 
-        if current_price is None or pd.isna(current_price):
-            return None
+        except Exception as e:
+            print(f"Error updating {ticker}: {e}")
+            
+        progress_bar.progress((i + 1) / total)
+        
+    status_text.empty()
+    progress_bar.empty()
+    return updated_df
 
-        # 2. Dividend Yield
-        yield_percent = 0.0
-        freq = 1
-        try:
+def add_new_stock(ticker_input):
+    clean = ticker_input.upper().strip()
+    if clean in st.session_state.portfolio['Ticker'].values:
+        st.warning("Aktie bereits im Portfolio.")
+        return
+
+    try:
+        with st.spinner(f"Suche {clean}..."):
+            stock = yf.Ticker(clean)
+            # Check if valid by fetching minimal history
+            hist = stock.history(period="1d")
+            if hist.empty:
+                st.error(f"Konnte {clean} nicht finden.")
+                return
+
+            price = hist['Close'].iloc[-1]
+            
+            # Metadata
             info = stock.info
-            if 'dividendYield' in info and info['dividendYield']:
-                yield_percent = info['dividendYield'] * 100
+            name = info.get('shortName', clean)
+            div_yield = (info.get('dividendYield', 0) or 0) * 100
             
-            # Estimate Frequency via history
-            divs = stock.dividends
-            if not divs.empty:
-                recent = divs[divs.index > (pd.Timestamp.now(tz=divs.index.tz) - pd.Timedelta(days=365))]
-                count = len(recent)
-                if count >= 10: freq = 12
-                elif count >= 3: freq = 4
-                elif count >= 2: freq = 2
-        except:
-            pass
-
-        # 3. Growth Rates (Fallback or Calc)
-        div_cagr = 3.0
-        price_cagr = 5.0
-        
-        # 4. Name
-        name = clean_ticker
-        try:
-            meta = stock.info
-            name = meta.get('shortName') or meta.get('longName') or clean_ticker
-        except:
-            pass
-
-        return {
-            'Ticker': clean_ticker,
-            'Name': name,
-            'Aktueller Kurs': float(current_price), 
-            'Kaufkurs': float(current_price),     
-            'Div Rendite %': round(float(yield_percent), 2),
-            'Intervall': freq,
-            'Div Wachs. %': div_cagr, 
-            'Kurs Wachs. %': price_cagr, 
-            'Sparrate €': 0.0,
-            'Reinvest': True
-        }
-    except:
-        return None
-
-def calculate_projection(df, years, pauschbetrag):
-    months = years * 12
-    projections = []
-    
-    sim = df.copy()
-    
-    # Init
-    sim['Jahresdiv_Pro_Aktie'] = sim['Aktueller Kurs'] * (sim['Div Rendite %'] / 100)
-    current_shares = dict(zip(sim['Ticker'], sim['Anteile'].astype(float)))
-    invested_capital_cash = (sim['Anteile'] * sim['Kaufkurs']).sum()
-    current_pausch = pauschbetrag
-    
-    # Year 0
-    curr_port_val = sum([current_shares[t] * sim.loc[sim['Ticker']==t, 'Aktueller Kurs'].values[0] for t in current_shares])
-    projections.append({
-        'Jahr': 0, 'Investiertes Kapital': invested_capital_cash, 
-        'Portfolio Wert': curr_port_val, 'Netto Dividende': 0, 
-        'Steuern': 0, 'Yield on Cost %': 0
-    })
-
-    year_net = 0
-    year_tax = 0
-    
-    for m in range(1, months + 1):
-        month_idx = ((m - 1) % 12) + 1
-        monthly_savings_cash = 0
-        
-        for idx, row in sim.iterrows():
-            ticker = row['Ticker']
-            freq = int(row['Intervall'])
-            curr_price = row['Aktueller Kurs']
+            new_row = {
+                'Ticker': clean,
+                'Name': name,
+                'Anteile': 0.0,
+                'Kaufkurs': float(price),
+                'Aktueller Kurs': float(price),
+                'Div Rendite %': round(div_yield, 2),
+                'Div Wachs. %': 5.0, # Default estimate
+                'Kurs Wachs. %': 7.0, # Default estimate
+                'Sparrate €': 0.0,
+                'Intervall': 1, # Annual default
+                'Reinvest': True
+            }
             
-            # Savings Plan
-            spar = row['Sparrate €']
-            if spar > 0:
-                shares_bought = spar / curr_price
-                current_shares[ticker] += shares_bought
-                monthly_savings_cash += spar
-            
-            # Dividend Payout
-            pays = (freq == 12) or \
-                   (freq == 4 and month_idx % 3 == 0) or \
-                   (freq == 2 and month_idx % 6 == 0) or \
-                   (freq == 1 and month_idx == 6)
-            
-            if pays:
-                gross = current_shares[ticker] * (row['Jahresdiv_Pro_Aktie'] / freq)
-                if gross > 0:
-                    tax = 0
-                    if gross > current_pausch:
-                        taxable = gross - current_pausch
-                        tax = taxable * 0.26375
-                        current_pausch = 0
-                    else:
-                        current_pausch -= gross
-                    
-                    net = gross - tax
-                    year_net += net
-                    year_tax += tax
-                    
-                    if row['Reinvest']:
-                        current_shares[ticker] += (net / curr_price)
-        
-        invested_capital_cash += monthly_savings_cash
-        
-        # Year End
-        if m % 12 == 0:
-            curr_port_val = 0
-            for t, shares in current_shares.items():
-                p = sim.loc[sim['Ticker'] == t, 'Aktueller Kurs'].values[0]
-                curr_port_val += shares * p
-            
-            yoc = (year_net / invested_capital_cash * 100) if invested_capital_cash > 0 else 0
-            projections.append({
-                'Jahr': m // 12,
-                'Investiertes Kapital': invested_capital_cash,
-                'Portfolio Wert': curr_port_val,
-                'Netto Dividende': year_net,
-                'Steuern': year_tax,
-                'Yield on Cost %': yoc
-            })
-            
-            year_net = 0; year_tax = 0; current_pausch = pauschbetrag
-            sim['Aktueller Kurs'] *= (1 + sim['Kurs Wachs. %'] / 100)
-            sim['Jahresdiv_Pro_Aktie'] *= (1 + sim['Div Wachs. %'] / 100)
-            
-    return pd.DataFrame(projections)
-
-
-# --- SIDEBAR ---
-with st.sidebar:
-    st.header("⚙️ Konfiguration")
-    pausch = st.number_input("Sparerpauschbetrag (€)", 0, 10000, 1000, step=100)
-    
-    st.divider()
-    st.markdown("### 💾 Datenverwaltung")
-    st.info("""
-    **Hinweis zur Speicherung:**
-    Lokal: Automatisch in `my_portfolio.csv`.
-    Web: Daten sind temporär. Bitte Export nutzen!
-    """)
-    
-    if not st.session_state.portfolio.empty:
-        csv = st.session_state.portfolio.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 CSV Exportieren", csv, "mein_portfolio.csv", "text/csv", use_container_width=True)
-        
-    up_file = st.file_uploader("📤 CSV Importieren", type=["csv"])
-    if up_file:
-        try:
-            df = pd.read_csv(up_file)
-            st.session_state.portfolio = df
-            save_portfolio(df)
-            st.success("Geladen!")
+            st.session_state.portfolio = pd.concat([st.session_state.portfolio, pd.DataFrame([new_row])], ignore_index=True)
+            save_data(st.session_state.portfolio)
+            st.success(f"{clean} hinzugefügt!")
+            time.sleep(0.5)
             st.rerun()
-        except:
-            st.error("Fehler.")
+            
+    except Exception as e:
+        st.error(f"Fehler: {str(e)}")
 
-# --- MAIN PAGE ---
-st.title("Dividend Master DE 🇩🇪")
+# --- 4. UI COMPONENTS ---
 
-# 1. ADD TICKER SECTION (Cleaner UI)
-with st.container():
-    st.markdown("#### ➕ Aktie hinzufügen")
-    c1, c2 = st.columns([4, 1])
-    with c1:
-        new_ticker = st.text_input("Ticker Symbol", placeholder="z.B. O, MSFT, ALV.DE", label_visibility="collapsed", key="ticker_in")
-    with c2:
-        if st.button("Suchen & Hinzufügen", type="primary", use_container_width=True):
-            if new_ticker:
-                with st.spinner("Lade Daten..."):
-                    d = get_stock_data(new_ticker)
-                    if d:
-                        st.session_state.portfolio = pd.concat([st.session_state.portfolio, pd.DataFrame([d])], ignore_index=True)
-                        save_portfolio(st.session_state.portfolio)
-                        st.rerun()
-                    else:
-                        st.error("Nicht gefunden.")
+def render_mobile_card(index, row):
+    """Renders a single stock as a nice card (Mobile Optimized)"""
+    with st.container(border=True):
+        # Header: Symbol + Name + Delete Button
+        c1, c2 = st.columns([4, 1])
+        with c1:
+            st.markdown(f"**{row['Ticker']}** <span style='color:gray; font-size:0.8em'>{row['Name']}</span>", unsafe_allow_html=True)
+        with c2:
+            if st.button("🗑️", key=f"del_{index}", help="Löschen"):
+                st.session_state.portfolio = st.session_state.portfolio.drop(index).reset_index(drop=True)
+                save_data(st.session_state.portfolio)
+                st.rerun()
+
+        st.divider()
+        
+        # Main Data Grid
+        c_left, c_right = st.columns(2)
+        
+        with c_left:
+            new_shares = st.number_input("Anteile", value=float(row['Anteile']), key=f"shares_{index}", step=1.0)
+            new_spar = st.number_input("Sparrate (€)", value=float(row['Sparrate €']), key=f"spar_{index}", step=25.0)
+            
+        with c_right:
+            # Display only (updated via refresh button)
+            st.markdown(f"""
+            <div style='text-align:right'>
+                <div style='font-size:0.8em; color:gray'>Kurs</div>
+                <div style='font-weight:bold'>{row['Aktueller Kurs']:.2f} €</div>
+                <div style='font-size:0.8em; color:gray; margin-top:8px'>Div. Rendite</div>
+                <div style='font-weight:bold; color:#059669'>{row['Div Rendite %']:.2f} %</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Update State if inputs changed
+        if new_shares != row['Anteile'] or new_spar != row['Sparrate €']:
+            st.session_state.portfolio.at[index, 'Anteile'] = new_shares
+            st.session_state.portfolio.at[index, 'Sparrate €'] = new_spar
+            save_data(st.session_state.portfolio)
+            # No rerun needed immediately, feels smoother
+
+        with st.expander("⚙️ Details & Prognose-Werte"):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                new_div_growth = st.number_input("Div. Wachstum %", value=float(row['Div Wachs. %']), key=f"dg_{index}")
+                new_reinvest = st.checkbox("Reinvestieren?", value=bool(row['Reinvest']), key=f"ri_{index}")
+            with col_b:
+                new_price_growth = st.number_input("Kurs Wachstum %", value=float(row['Kurs Wachs. %']), key=f"pg_{index}")
+                new_freq = st.selectbox("Ausschüttung", options=[1, 4, 12], index={1:0, 4:1, 12:2}.get(row['Intervall'], 0), key=f"fq_{index}")
+
+            # Save expanded changes
+            if (new_div_growth != row['Div Wachs. %'] or new_price_growth != row['Kurs Wachs. %'] or 
+                new_reinvest != row['Reinvest'] or new_freq != row['Intervall']):
+                st.session_state.portfolio.at[index, 'Div Wachs. %'] = new_div_growth
+                st.session_state.portfolio.at[index, 'Kurs Wachs. %'] = new_price_growth
+                st.session_state.portfolio.at[index, 'Reinvest'] = new_reinvest
+                st.session_state.portfolio.at[index, 'Intervall'] = new_freq
+                save_data(st.session_state.portfolio)
+
+
+# --- 5. MAIN APP LAYOUT ---
+
+# Top Bar
+col_logo, col_refresh = st.columns([3, 1])
+with col_logo:
+    st.title("Dividend Master")
+with col_refresh:
+    st.write("") # Spacer
+    if st.button("🔄 Preise Update"):
+        with st.spinner("Aktualisiere Markt..."):
+            st.session_state.portfolio = update_market_data(st.session_state.portfolio)
+            save_data(st.session_state.portfolio)
+        st.rerun()
+
+# Add Stock Expander
+with st.expander("➕ Neue Aktie hinzufügen", expanded=st.session_state.portfolio.empty):
+    with st.form("add_stock_form"):
+        c1, c2 = st.columns([3, 1])
+        ticker_in = c1.text_input("Ticker (z.B. O, MSFT)", placeholder="US-Ticker oder .DE")
+        submitted = st.form_submit_button("Hinzufügen", type="primary")
+        if submitted and ticker_in:
+            add_new_stock(ticker_in)
+
+# Calculations
+df = st.session_state.portfolio
+total_invest = (df['Anteile'] * df['Kaufkurs']).sum()
+current_value = (df['Anteile'] * df['Aktueller Kurs']).sum()
+annual_div_gross = (df['Anteile'] * df['Aktueller Kurs'] * (df['Div Rendite %']/100)).sum()
+monthly_savings = df['Sparrate €'].sum()
+
+# Dashboard Metrics
+m1, m2, m3 = st.columns(3)
+m1.metric("Portfolio Wert", f"{current_value:,.2f} €", delta=f"{current_value-total_invest:,.2f} €")
+m2.metric("Jahresdividende (Brutto)", f"{annual_div_gross:,.2f} €", delta=f"{(annual_div_gross/current_value*100) if current_value>0 else 0:.2f} % Rendite")
+m3.metric("Sparrate / Monat", f"{monthly_savings:,.0f} €")
 
 st.divider()
 
-# 2. PORTFOLIO TABLE
-if not st.session_state.portfolio.empty:
-    st.markdown("#### 📋 Dein Portfolio")
-    
-    # Data Editor
-    edited = st.data_editor(
-        st.session_state.portfolio,
-        key="portfolio_editor",
-        column_config={
-            "Ticker": st.column_config.TextColumn(disabled=True, width="small"),
-            "Name": st.column_config.TextColumn(disabled=True, width="medium"),
-            "Kaufkurs": st.column_config.NumberColumn("Ø Kauf €", format="%.2f €"),
-            "Aktueller Kurs": st.column_config.NumberColumn("Kurs €", format="%.2f €", disabled=True),
-            "Anteile": st.column_config.NumberColumn(format="%.2f"),
-            "Div Rendite %": st.column_config.NumberColumn("Div %", format="%.2f %%"),
-            "Div Wachs. %": st.column_config.NumberColumn("D-Wachs%", format="%.1f %%"),
-            "Kurs Wachs. %": st.column_config.NumberColumn("K-Wachs%", format="%.1f %%"),
-            "Sparrate €": st.column_config.NumberColumn("Sparrate", format="%.0f €"),
-            "Intervall": st.column_config.SelectboxColumn("Zyklus", options=[1,2,4,12], width="small"),
-            "Reinvest": st.column_config.CheckboxColumn("Auto-Reinvest", default=True)
-        },
-        use_container_width=True,
-        hide_index=True,
-        num_rows="dynamic" # This actually allows deletion, but we add explicit button below
-    )
+# VIEW TABS
+tab_cards, tab_table, tab_sim = st.tabs(["📱 Portfolio", "📝 Editor (Tabelle)", "📊 Prognose"])
 
-    # Sync Changes
-    if not edited.equals(st.session_state.portfolio):
-        st.session_state.portfolio = edited
-        save_portfolio(edited)
+# TAB 1: MOBILE CARDS
+with tab_cards:
+    if df.empty:
+        st.info("Dein Portfolio ist leer.")
+    else:
+        for idx, row in df.iterrows():
+            render_mobile_card(idx, row)
+
+# TAB 2: DESKTOP TABLE
+with tab_table:
+    st.caption("Excel-ähnlicher Editor für schnelle Änderungen an vielen Werten.")
+    edited_df = st.data_editor(
+        df,
+        key="data_editor",
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "Ticker": st.column_config.TextColumn(disabled=True),
+            "Aktueller Kurs": st.column_config.NumberColumn(format="%.2f €", disabled=True),
+            "Anteile": st.column_config.NumberColumn(format="%.4f"),
+            "Div Rendite %": st.column_config.NumberColumn(format="%.2f %%"),
+            "Sparrate €": st.column_config.NumberColumn(format="%.2f €"),
+        }
+    )
+    if not edited_df.equals(df):
+        st.session_state.portfolio = edited_df
+        save_data(edited_df)
         st.rerun()
 
-    # 3. EXPLICIT DELETE FUNCTION (Cleaner than native UI on mobile)
-    with st.expander("🗑️ Positionen verwalten / löschen"):
-        st.caption("Falls das Löschen in der Tabelle oben nicht klappt:")
-        to_delete = st.multiselect("Aktien zum Entfernen auswählen:", st.session_state.portfolio['Ticker'].unique())
-        if st.button("Ausgewählte Aktien unwiderruflich löschen", type="secondary"):
-            if to_delete:
-                st.session_state.portfolio = st.session_state.portfolio[~st.session_state.portfolio['Ticker'].isin(to_delete)]
-                save_portfolio(st.session_state.portfolio)
-                st.rerun()
-
-    st.divider()
-
-    # 4. SIMULATION DASHBOARD
-    st.subheader("📊 Prognose Dashboard")
+# TAB 3: PROGNOSE
+with tab_sim:
+    st.header("Zinseszins Simulation")
+    years = st.slider("Jahre", 5, 40, 15)
+    pausch = st.number_input("Freibetrag", 0, 10000, 1000)
     
-    sim_years = st.slider("Zeithorizont (Jahre)", 5, 40, 15)
-    results = calculate_projection(edited, sim_years, pausch)
-    
-    # Year Selector
-    year_sel = st.select_slider("Zeitreise zu Jahr:", options=results['Jahr'].unique(), value=sim_years//2)
-    
-    # Metrics
-    row = results[results['Jahr'] == year_sel].iloc[0]
-    
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Ø Monatlich (Netto)", f"{row['Netto Dividende']/12:,.2f} €")
-    m2.metric("Jahres-Netto", f"{row['Netto Dividende']:,.0f} €", delta=f"{row['Yield on Cost %']:.1f}% YoC")
-    m3.metric("Portfolio Wert", f"{row['Portfolio Wert']:,.0f} €")
-    inv = row['Investiertes Kapital']
-    gain = row['Portfolio Wert'] - inv
-    m4.metric("Gesamtgewinn", f"{gain:,.0f} €", delta=f"{gain/inv*100:.0f}%" if inv>0 else "0%")
+    if not df.empty:
+        # Simple Simulation Logic inside view for performance
+        sim_data = []
+        
+        # Local copies
+        sim_shares = df['Anteile'].values.copy()
+        sim_prices = df['Aktueller Kurs'].values.copy()
+        sim_div_yields = df['Div Rendite %'].values.copy() / 100
+        sim_div_growths = df['Div Wachs. %'].values.copy() / 100
+        sim_price_growths = df['Kurs Wachs. %'].values.copy() / 100
+        sim_savings = df['Sparrate €'].values.copy()
+        sim_reinvest = df['Reinvest'].values.copy()
+        sim_freqs = df['Intervall'].values.copy()
+        
+        sim_div_per_share = sim_prices * sim_div_yields
+        
+        accumulated_net = 0
+        
+        for y in range(1, years + 1):
+            year_gross = 0
+            year_net = 0
+            
+            # 1. Sparpläne (vereinfacht am Jahresanfang für Performance)
+            shares_bought = (sim_savings * 12) / sim_prices
+            sim_shares += shares_bought
+            
+            # 2. Dividenden
+            gross_payouts = sim_shares * sim_div_per_share
+            total_gross = gross_payouts.sum()
+            
+            # Steuer
+            taxable = max(0, total_gross - pausch)
+            tax = taxable * 0.26375
+            net_income = total_gross - tax
+            
+            # 3. Reinvest
+            # Distribute net income proportionally to stocks marked as Reinvest
+            reinvest_indices = np.where(sim_reinvest)[0]
+            if len(reinvest_indices) > 0 and net_income > 0:
+                # Naive distribution: Reinvest into the stock that paid it? 
+                # Or distribute total net back into portfolio?
+                # Prompt said: "Wenn Reinvest aktiv ist, wird Netto genutz um neue Anteile DIESES Titels zu kaufen"
+                
+                # We need to calculate tax per stock essentially, but tax is global.
+                # Simplification: Effective Tax Rate applied to each stock
+                eff_tax_rate = tax / total_gross if total_gross > 0 else 0
+                
+                for idx in reinvest_indices:
+                    gross_stock = gross_payouts[idx]
+                    net_stock = gross_stock * (1 - eff_tax_rate)
+                    new_shares_drip = net_stock / sim_prices[idx]
+                    sim_shares[idx] += new_shares_drip
+            
+            # Update Metrics for next year
+            sim_prices *= (1 + sim_price_growths)
+            sim_div_per_share *= (1 + sim_div_growths)
+            
+            portfolio_value = (sim_shares * sim_prices).sum()
+            
+            sim_data.append({
+                "Jahr": y,
+                "Dividende (Netto)": net_income,
+                "Portfolio Wert": portfolio_value
+            })
+            
+        sim_df = pd.DataFrame(sim_data)
+        
+        st.bar_chart(sim_df.set_index("Jahr")["Dividende (Netto)"], color="#0f172a")
+        st.area_chart(sim_df.set_index("Jahr")["Portfolio Wert"], color="#2563eb")
+        st.dataframe(sim_df.style.format("{:.0f}"), use_container_width=True)
 
-    # Charts
-    tab1, tab2 = st.tabs(["📈 Chart-Ansicht", "🔢 Tabellen-Ansicht"])
-    with tab1:
-        st.area_chart(results.set_index('Jahr')[['Investiertes Kapital', 'Portfolio Wert']], color=["#cbd5e1", "#2563eb"])
-        st.bar_chart(results.set_index('Jahr')['Netto Dividende'], color="#0d9488")
-    with tab2:
-        st.dataframe(results.style.format("{:.0f}"), use_container_width=True)
-
-else:
-    st.info("👆 Dein Portfolio ist leer. Füge oben Aktien hinzu!")
